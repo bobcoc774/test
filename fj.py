@@ -33,7 +33,7 @@ BULLET_COOLDOWN = 20  # 冷却帧数
 ENEMY_SIZE = 30
 ENEMY_SPEED = 3
 ENEMY_COLOR = RED
-ENEMY_SPAWN_RATE = 30  # 每 N 帧生成一个敌机
+ENEMY_SPAWN_RATE = 3000  # 每 N 毫秒生成一个敌机（1秒一个）
 
 # --- 屏幕设置 ---
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
