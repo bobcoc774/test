@@ -1,356 +1,434 @@
-import json
-import math
+﻿import pygame
 import random
-from collections import deque
-from pathlib import Path
+import math
 
-import pygame
+# --- 初始化 ---
+pygame.init()
 
+# --- 常量 ---
+CELL_SIZE = 20
+GRID_WIDTH = 30
+GRID_HEIGHT = 20
+SCREEN_WIDTH = CELL_SIZE * GRID_WIDTH
+SCREEN_HEIGHT = CELL_SIZE * GRID_HEIGHT
 
-CELL_SIZE = 28
-GRID_WIDTH = 28
-GRID_HEIGHT = 19
-HUD_HEIGHT = 76
-BOARD_WIDTH = CELL_SIZE * GRID_WIDTH
-BOARD_HEIGHT = CELL_SIZE * GRID_HEIGHT
-SCREEN_WIDTH = BOARD_WIDTH
-SCREEN_HEIGHT = HUD_HEIGHT + BOARD_HEIGHT
-RENDER_FPS = 60
+# 颜色
+BLACK = (10, 10, 20)
+DARK_GREEN = (0, 40, 0)
+GRID_COLOR = (25, 25, 40)
+WALL_COLOR = (60, 60, 100)
+WHITE = (255, 255, 255)
+RED = (255, 60, 60)
+GOLD = (255, 215, 0)
+GRAY = (150, 150, 150)
 
-BACKGROUND = (10, 14, 18)
-BOARD = (17, 23, 28)
-GRID = (25, 33, 39)
-TEXT = (232, 239, 242)
-MUTED = (132, 148, 155)
-GREEN = (62, 207, 126)
-GREEN_DARK = (28, 139, 82)
-APPLE = (244, 91, 94)
-GOLD = (255, 196, 72)
+# 苹果颜色
+APPLE_RED = (255, 50, 50)
+APPLE_GREEN = (150, 255, 50)
+APPLE_DARK = (180, 20, 20)
+APPLE_LIGHT = (255, 130, 130)
 
-UP = (0, -1)
-DOWN = (0, 1)
-LEFT = (-1, 0)
-RIGHT = (1, 0)
-OPPOSITE = {UP: DOWN, DOWN: UP, LEFT: RIGHT, RIGHT: LEFT}
+# --- 粒子系统 ---
+class Particle:
+    def __init__(self, x, y, color, lifetime=20):
+        self.x = x
+        self.y = y
+        self.vx = random.uniform(-2, 2)
+        self.vy = random.uniform(-2, 2)
+        self.color = color
+        self.lifetime = lifetime
+        self.max_lifetime = lifetime
+        self.size = random.randint(2, 5)
 
-SAVE_FILE = Path(__file__).with_name("snake_high_score.json")
+    def update(self):
+        self.x += self.vx
+        self.y += self.vy
+        self.lifetime -= 1
+        self.vx *= 0.95
+        self.vy *= 0.95
+        return self.lifetime > 0
 
+    def draw(self, surface):
+        alpha = self.lifetime / self.max_lifetime
+        size = max(1, int(self.size * alpha))
+        c = tuple(int(ch * alpha) for ch in self.color)
+        pygame.draw.circle(surface, c, (int(self.x), int(self.y)), size)
 
-def load_high_score():
-    try:
-        return max(0, int(json.loads(SAVE_FILE.read_text(encoding="utf-8"))["high_score"]))
-    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-        return 0
+class Particles:
+    def __init__(self):
+        self.items = []
 
+    def emit(self, x, y, count, color, lifetime=20):
+        for _ in range(count):
+            self.items.append(Particle(x, y, color, lifetime))
 
-def save_high_score(score):
-    try:
-        SAVE_FILE.write_text(json.dumps({"high_score": score}), encoding="utf-8")
-    except OSError:
-        pass
+    def update(self):
+        self.items = [p for p in self.items if p.update()]
 
+    def draw(self, surface):
+        for p in self.items:
+            p.draw(surface)
 
-def get_font(size, bold=False):
-    candidates = ["Microsoft YaHei UI", "Microsoft YaHei", "SimHei", "Arial"]
-    return pygame.font.SysFont(candidates, size, bold=bold)
+# --- 得分弹出 ---
+class ScorePopup:
+    def __init__(self, x, y, text, color=WHITE):
+        self.x = x
+        self.y = y
+        self.text = text
+        self.color = color
+        self.life = 40
+        self.max_life = 40
+        self.font = pygame.font.SysFont("monospace", 22, bold=True)
 
+    def update(self):
+        self.y -= 1.2
+        self.life -= 1
+        return self.life > 0
 
+    def draw(self, surface):
+        alpha = self.life / self.max_life
+        s = self.font.render(self.text, True, self.color)
+        s.set_alpha(int(255 * alpha))
+        surface.blit(s, (self.x - s.get_width() // 2, int(self.y)))
+
+# --- 蛇 ---
 class Snake:
     def __init__(self):
         self.reset()
 
     def reset(self):
-        center = (GRID_WIDTH // 2, GRID_HEIGHT // 2)
-        self.body = deque(
-            [(center[0], center[1]), (center[0] - 1, center[1]), (center[0] - 2, center[1])]
-        )
-        self.direction = RIGHT
-        self.pending_directions = deque(maxlen=2)
-        self.grow_by = 0
+        cx = GRID_WIDTH // 2
+        cy = GRID_HEIGHT // 2
+        self.body = [(cx, cy), (cx - 1, cy), (cx - 2, cy)]
+        self.direction = "RIGHT"
+        self.next_direction = "RIGHT"
+        self.grow_pending = 0  # 待增长格数
+        self.alive = True
 
-    @property
-    def head(self):
-        return self.body[0]
+    def set_direction(self, d):
+        opposite = {"UP": "DOWN", "DOWN": "UP", "LEFT": "RIGHT", "RIGHT": "LEFT"}
+        if d != opposite.get(self.direction, ""):
+            self.next_direction = d
 
-    def queue_direction(self, direction):
-        reference = self.pending_directions[-1] if self.pending_directions else self.direction
-        if direction != reference and direction != OPPOSITE[reference]:
-            self.pending_directions.append(direction)
+    def move(self):
+        if not self.alive:
+            return
+        self.direction = self.next_direction
+        hx, hy = self.body[0]
+        if self.direction == "RIGHT":
+            nh = (hx + 1, hy)
+        elif self.direction == "LEFT":
+            nh = (hx - 1, hy)
+        elif self.direction == "UP":
+            nh = (hx, hy - 1)
+        elif self.direction == "DOWN":
+            nh = (hx, hy + 1)
+        else:
+            nh = (hx, hy)
 
-    def next_head(self):
-        if self.pending_directions:
-            self.direction = self.pending_directions.popleft()
-        return (self.head[0] + self.direction[0], self.head[1] + self.direction[1])
-
-    def move_to(self, new_head):
-        self.body.appendleft(new_head)
-        if self.grow_by:
-            self.grow_by -= 1
+        self.body.insert(0, nh)
+        if self.grow_pending > 0:
+            self.grow_pending -= 1
         else:
             self.body.pop()
 
-    def hits_self(self, position, will_grow=False):
-        body_to_check = self.body if will_grow else list(self.body)[:-1]
-        return position in body_to_check
+    def check_death(self):
+        hx, hy = self.body[0]
+        # 撞墙
+        if hx < 0 or hx >= GRID_WIDTH or hy < 0 or hy >= GRID_HEIGHT:
+            self.alive = False
+            return True
+        # 撞自身
+        if self.body[0] in self.body[1:]:
+            self.alive = False
+            return True
+        return False
 
+    def grow(self, n=1):
+        self.grow_pending += n
 
-class Game:
+    def head_pixel(self):
+        hx, hy = self.body[0]
+        return (hx * CELL_SIZE + CELL_SIZE // 2, hy * CELL_SIZE + CELL_SIZE // 2)
+
+# --- 苹果 ---
+class Apple:
     def __init__(self):
-        self.snake = Snake()
-        self.high_score = load_high_score()
-        self.particles = []
-        self.state = "ready"
-        self.reset()
+        self.pos = (0, 0)
+        self.special = False  # 金苹果，+3分
 
-    def reset(self):
-        self.snake.reset()
-        self.score = 0
-        self.foods_eaten = 0
-        self.food = self.spawn_food()
-        self.is_golden = False
-        self.move_accumulator = 0.0
-        self.particles.clear()
+    def spawn(self, snake):
+        while True:
+            x = random.randint(0, GRID_WIDTH - 1)
+            y = random.randint(0, GRID_HEIGHT - 1)
+            if (x, y) not in snake.body:
+                self.pos = (x, y)
+                self.special = random.random() < 0.15  # 15%概率金苹果
+                break
 
-    @property
-    def move_interval(self):
-        # Starts forgiving and gradually tops out at roughly 16 cells per second.
-        return max(0.062, 0.135 - min(self.foods_eaten, 25) * 0.0028)
+    def pixel_center(self):
+        return (self.pos[0] * CELL_SIZE + CELL_SIZE // 2,
+                self.pos[1] * CELL_SIZE + CELL_SIZE // 2)
 
-    def spawn_food(self):
-        occupied = set(self.snake.body)
-        empty = [
-            (x, y)
-            for y in range(GRID_HEIGHT)
-            for x in range(GRID_WIDTH)
-            if (x, y) not in occupied
-        ]
-        return random.choice(empty) if empty else None
-
-    def start(self):
-        if self.state in {"ready", "paused"}:
-            self.state = "running"
-        elif self.state == "game_over":
-            self.reset()
-            self.state = "running"
-
-    def toggle_pause(self):
-        if self.state == "running":
-            self.state = "paused"
-        elif self.state == "paused":
-            self.state = "running"
-
-    def turn(self, direction):
-        if self.state == "ready":
-            self.state = "running"
-        if self.state == "running":
-            self.snake.queue_direction(direction)
-
-    def update(self, dt):
-        self.update_particles(dt)
-        if self.state != "running":
-            return
-
-        self.move_accumulator += dt
-        while self.move_accumulator >= self.move_interval and self.state == "running":
-            self.move_accumulator -= self.move_interval
-            self.step()
-
-    def step(self):
-        new_head = self.snake.next_head()
-        eating = new_head == self.food
-        outside = not (0 <= new_head[0] < GRID_WIDTH and 0 <= new_head[1] < GRID_HEIGHT)
-        if outside or self.snake.hits_self(new_head, will_grow=eating):
-            self.finish()
-            return
-
-        self.snake.move_to(new_head)
-        if not eating:
-            return
-
-        points = 3 if self.is_golden else 1
-        self.score += points
-        self.foods_eaten += 1
-        self.snake.grow_by += 1
-        self.add_particles(new_head, GOLD if self.is_golden else APPLE)
-        self.is_golden = self.foods_eaten % 5 == 0
-        self.food = self.spawn_food()
-        if self.food is None:
-            self.finish()
-
-    def finish(self):
-        self.state = "game_over"
-        if self.score > self.high_score:
-            self.high_score = self.score
-            save_high_score(self.high_score)
-
-    def add_particles(self, cell, color):
-        px = cell[0] * CELL_SIZE + CELL_SIZE / 2
-        py = HUD_HEIGHT + cell[1] * CELL_SIZE + CELL_SIZE / 2
-        for _ in range(12):
-            angle = random.random() * math.tau
-            speed = random.uniform(45, 105)
-            self.particles.append(
-                [px, py, math.cos(angle) * speed, math.sin(angle) * speed, 0.45, color]
-            )
-
-    def update_particles(self, dt):
-        for particle in self.particles:
-            particle[0] += particle[2] * dt
-            particle[1] += particle[3] * dt
-            particle[4] -= dt
-        self.particles = [particle for particle in self.particles if particle[4] > 0]
-
-
-def rounded_cell_rect(cell, inset=3):
-    return pygame.Rect(
-        cell[0] * CELL_SIZE + inset,
-        HUD_HEIGHT + cell[1] * CELL_SIZE + inset,
-        CELL_SIZE - inset * 2,
-        CELL_SIZE - inset * 2,
-    )
-
-
-def draw_board(screen):
-    pygame.draw.rect(screen, BOARD, (0, HUD_HEIGHT, BOARD_WIDTH, BOARD_HEIGHT))
-    for x in range(0, BOARD_WIDTH + 1, CELL_SIZE):
-        pygame.draw.line(screen, GRID, (x, HUD_HEIGHT), (x, SCREEN_HEIGHT))
-    for y in range(HUD_HEIGHT, SCREEN_HEIGHT + 1, CELL_SIZE):
-        pygame.draw.line(screen, GRID, (0, y), (BOARD_WIDTH, y))
-
-
-def draw_food(screen, game, now):
-    if game.food is None:
-        return
-    center = (
-        game.food[0] * CELL_SIZE + CELL_SIZE // 2,
-        HUD_HEIGHT + game.food[1] * CELL_SIZE + CELL_SIZE // 2,
-    )
-    color = GOLD if game.is_golden else APPLE
-    pulse = 1.0 + math.sin(now * 5) * 0.08
-    radius = int(9 * pulse)
-    glow = pygame.Surface((CELL_SIZE * 2, CELL_SIZE * 2), pygame.SRCALPHA)
-    pygame.draw.circle(glow, (*color, 35), (CELL_SIZE, CELL_SIZE), radius + 7)
-    screen.blit(glow, (center[0] - CELL_SIZE, center[1] - CELL_SIZE))
-    pygame.draw.circle(screen, color, center, radius)
-    pygame.draw.ellipse(screen, (255, 255, 255), (center[0] - 4, center[1] - 5, 4, 3))
-    pygame.draw.line(screen, GREEN, (center[0], center[1] - 8), (center[0] + 4, center[1] - 13), 3)
-
-
-def draw_snake(screen, snake):
-    for index, segment in reversed(list(enumerate(snake.body))):
-        progress = index / max(1, len(snake.body) - 1)
-        color = (
-            int(GREEN[0] + (GREEN_DARK[0] - GREEN[0]) * progress),
-            int(GREEN[1] + (GREEN_DARK[1] - GREEN[1]) * progress),
-            int(GREEN[2] + (GREEN_DARK[2] - GREEN[2]) * progress),
-        )
-        pygame.draw.rect(screen, color, rounded_cell_rect(segment), border_radius=7)
-
-    head = snake.head
-    cx = head[0] * CELL_SIZE + CELL_SIZE // 2
-    cy = HUD_HEIGHT + head[1] * CELL_SIZE + CELL_SIZE // 2
-    dx, dy = snake.direction
-    perpendicular = (-dy, dx)
-    for side in (-1, 1):
-        eye = (
-            int(cx + dx * 6 + perpendicular[0] * side * 5),
-            int(cy + dy * 6 + perpendicular[1] * side * 5),
-        )
-        pygame.draw.circle(screen, (242, 250, 246), eye, 3)
-        pygame.draw.circle(screen, (18, 34, 27), eye, 1)
-
-
-def draw_particles(screen, particles):
-    for x, y, _, _, life, color in particles:
-        radius = max(1, int(life * 9))
-        pygame.draw.circle(screen, color, (int(x), int(y)), radius)
-
-
-def draw_hud(screen, game, fonts):
-    title_font, score_font, small_font = fonts
-    screen.blit(title_font.render("SNAKE", True, TEXT), (22, 14))
-    score = score_font.render(f"{game.score:02d}", True, TEXT)
-    screen.blit(score, score.get_rect(center=(SCREEN_WIDTH // 2, 32)))
-    screen.blit(small_font.render("SCORE", True, MUTED), (SCREEN_WIDTH // 2 - 26, 51))
-
-    best = small_font.render(f"BEST  {game.high_score:02d}", True, MUTED)
-    screen.blit(best, best.get_rect(right=SCREEN_WIDTH - 22, centery=30))
-    speed_level = min(10, 1 + game.foods_eaten // 3)
-    speed = small_font.render(f"SPEED  {speed_level}", True, MUTED)
-    screen.blit(speed, speed.get_rect(right=SCREEN_WIDTH - 22, centery=53))
-
-
-def draw_overlay(screen, game, fonts):
-    if game.state == "running":
-        return
-    _, _, small_font = fonts
-    overlay = pygame.Surface((SCREEN_WIDTH, BOARD_HEIGHT), pygame.SRCALPHA)
-    overlay.fill((5, 8, 10, 176))
-    screen.blit(overlay, (0, HUD_HEIGHT))
-
-    heading_font = get_font(42, bold=True)
-    if game.state == "ready":
-        heading, subline = "准备好了吗？", "方向键 / WASD 开始"
-    elif game.state == "paused":
-        heading, subline = "已暂停", "按空格继续"
-    else:
-        heading, subline = "游戏结束", f"本局 {game.score} 分 · 按 R 再来一局"
-
-    heading_surface = heading_font.render(heading, True, TEXT)
-    subline_surface = small_font.render(subline, True, (190, 204, 210))
-    center_y = HUD_HEIGHT + BOARD_HEIGHT // 2
-    screen.blit(heading_surface, heading_surface.get_rect(center=(SCREEN_WIDTH // 2, center_y - 22)))
-    screen.blit(subline_surface, subline_surface.get_rect(center=(SCREEN_WIDTH // 2, center_y + 34)))
-
+# --- 主游戏 ---
+def lerp_color(c1, c2, t):
+    return tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3))
 
 def main():
-    pygame.init()
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    pygame.display.set_caption("贪吃蛇")
+    pygame.display.set_caption("Snake - Qwythos by Empero AI")
     clock = pygame.time.Clock()
-    fonts = (get_font(24, True), get_font(32, True), get_font(15, True))
-    game = Game()
 
-    key_directions = {
-        pygame.K_UP: UP,
-        pygame.K_w: UP,
-        pygame.K_DOWN: DOWN,
-        pygame.K_s: DOWN,
-        pygame.K_LEFT: LEFT,
-        pygame.K_a: LEFT,
-        pygame.K_RIGHT: RIGHT,
-        pygame.K_d: RIGHT,
-    }
+    font = pygame.font.SysFont("monospace", 28, bold=True)
+    big_font = pygame.font.SysFont("monospace", 48, bold=True)
+    small_font = pygame.font.SysFont("monospace", 18)
+
+    snake = Snake()
+    apple = Apple()
+    apple.spawn(snake)
+    particles = Particles()
+    popups = []
 
     running = True
+    game_over = False
+    paused = False
+    score = 0
+    high_score = 0
+    move_timer = 0
+    base_move_interval = 8  # 基础移动间隔（帧）
+    shake_timer = 0
+
+    # 金苹果闪烁
+    flash_timer = 0
+
+    # 预先绘制网格背景
+    grid_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+    grid_surf.fill(BLACK)
+    for x in range(0, SCREEN_WIDTH, CELL_SIZE):
+        pygame.draw.line(grid_surf, GRID_COLOR, (x, 0), (x, SCREEN_HEIGHT), 1)
+    for y in range(0, SCREEN_HEIGHT, CELL_SIZE):
+        pygame.draw.line(grid_surf, GRID_COLOR, (0, y), (SCREEN_WIDTH, y), 1)
+
     while running:
-        dt = min(clock.tick(RENDER_FPS) / 1000.0, 0.1)
+        dt_sec = clock.get_time() / 1000.0
+        flash_timer += 1
+
+        # --- 事件 ---
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-            elif event.type == pygame.KEYDOWN:
+
+            if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
-                elif event.key in (pygame.K_SPACE, pygame.K_p):
-                    game.start() if game.state in {"ready", "game_over"} else game.toggle_pause()
-                elif event.key == pygame.K_r:
-                    game.reset()
-                    game.state = "running"
-                elif event.key in key_directions:
-                    game.turn(key_directions[event.key])
 
-        game.update(dt)
-        screen.fill(BACKGROUND)
-        draw_board(screen)
-        draw_food(screen, game, pygame.time.get_ticks() / 1000.0)
-        draw_snake(screen, game.snake)
-        draw_particles(screen, game.particles)
-        draw_hud(screen, game, fonts)
-        draw_overlay(screen, game, fonts)
+                if game_over:
+                    if event.key == pygame.K_r:
+                        snake.reset()
+                        apple.spawn(snake)
+                        particles.items.clear()
+                        popups.clear()
+                        game_over = False
+                        paused = False
+                        score = 0
+                        move_timer = 0
+                        shake_timer = 0
+                    continue
+
+                if event.key == pygame.K_p:
+                    paused = not paused
+                    continue
+
+                if not paused:
+                    if event.key == pygame.K_UP or event.key == pygame.K_w:
+                        snake.set_direction("UP")
+                    elif event.key == pygame.K_DOWN or event.key == pygame.K_s:
+                        snake.set_direction("DOWN")
+                    elif event.key == pygame.K_LEFT or event.key == pygame.K_a:
+                        snake.set_direction("LEFT")
+                    elif event.key == pygame.K_RIGHT or event.key == pygame.K_d:
+                        snake.set_direction("RIGHT")
+
+        # --- 更新 ---
+        if not game_over and not paused:
+            move_interval = max(3, base_move_interval - score // 5)
+            move_timer += 1
+            if move_timer >= move_interval:
+                move_timer = 0
+                snake.move()
+
+                # 吃苹果
+                if snake.body[0] == apple.pos:
+                    points = 3 if apple.special else 1
+                    snake.grow(points)
+                    score += points
+                    px, py = apple.pixel_center()
+                    color = GOLD if apple.special else RED
+                    particles.emit(px, py, 15, color, 25)
+                    popups.append(ScorePopup(px, py - 15, f"+{points}", GOLD if apple.special else WHITE))
+                    apple.spawn(snake)
+
+                # 死亡检测
+                if snake.check_death():
+                    game_over = True
+                    shake_timer = 15
+                    hx, hy = snake.head_pixel()
+                    particles.emit(hx, hy, 30, RED, 40)
+                    if score > high_score:
+                        high_score = score
+
+        # 粒子与弹出更新
+        particles.update()
+        popups = [p for p in popups if p.update()]
+
+        if shake_timer > 0:
+            shake_timer -= 1
+
+        # --- 绘制 ---
+        shake_x = random.randint(-4, 4) if shake_timer > 0 else 0
+        shake_y = random.randint(-4, 4) if shake_timer > 0 else 0
+
+        screen.blit(grid_surf, (shake_x, shake_y))
+
+        # 墙壁边框高亮
+        wall_rect = pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
+        pygame.draw.rect(screen, WALL_COLOR, wall_rect, 3)
+
+        # 绘制苹果
+        ax, ay = apple.pos[0] * CELL_SIZE, apple.pos[1] * CELL_SIZE
+        if apple.special:
+            # 金苹果脉冲
+            pulse = 1 + math.sin(flash_timer * 0.15) * 0.2
+            r = int(CELL_SIZE // 2 * pulse)
+            cx, cy = ax + CELL_SIZE // 2, ay + CELL_SIZE // 2
+            pygame.draw.circle(screen, GOLD, (cx, cy), r)
+            pygame.draw.circle(screen, (255, 240, 180), (cx, cy), r - 2)
+            # 光晕
+            glow = pygame.Surface((r * 4, r * 4), pygame.SRCALPHA)
+            pygame.draw.circle(glow, (255, 215, 0, 40), (r * 2, r * 2), r * 2)
+            screen.blit(glow, (cx - r * 2, cy - r * 2))
+        else:
+            # 红苹果带叶子
+            pulse = 1 + math.sin(flash_timer * 0.1) * 0.08
+            r = int(CELL_SIZE // 2 * pulse) - 1
+            cx, cy = ax + CELL_SIZE // 2, ay + CELL_SIZE // 2
+            pygame.draw.circle(screen, APPLE_RED, (cx, cy), r)
+            # 高光
+            pygame.draw.circle(screen, APPLE_LIGHT, (cx - 2, cy - 3), max(1, r // 3))
+            # 叶子
+            leaf_x, leaf_y = cx, cy - r + 1
+            pygame.draw.ellipse(screen, APPLE_GREEN, (leaf_x - 3, leaf_y - 3, 7, 5))
+
+        # 绘制蛇身
+        head_color = (80, 255, 80)
+        tail_color = (0, 120, 0)
+        body_len = len(snake.body)
+
+        for i, (bx, by) in enumerate(snake.body):
+            t = i / max(1, body_len - 1)
+            base = lerp_color(head_color, tail_color, t)
+            dark = lerp_color(
+                tuple(max(0, c - 40) for c in head_color),
+                tuple(max(0, c - 40) for c in tail_color),
+                t
+            )
+
+            px = bx * CELL_SIZE + shake_x
+            py = by * CELL_SIZE + shake_y
+            margin = 2 if i == 0 else 1
+
+            # 圆角蛇身
+            inner_rect = pygame.Rect(px + margin, py + margin,
+                                     CELL_SIZE - margin * 2, CELL_SIZE - margin * 2)
+            pygame.draw.rect(screen, base, inner_rect, border_radius=5)
+            # 内部高光
+            highlight = pygame.Rect(px + margin + 2, py + margin + 2,
+                                    CELL_SIZE - margin * 2 - 4, CELL_SIZE // 2 - margin - 1)
+            lighter = tuple(min(255, c + 30) for c in base)
+            pygame.draw.rect(screen, lighter, highlight, border_radius=3)
+
+            # 蛇头：画眼睛
+            if i == 0:
+                eye_r = 4
+                if snake.direction == "RIGHT":
+                    e1 = (px + CELL_SIZE - 6, py + 5)
+                    e2 = (px + CELL_SIZE - 6, py + CELL_SIZE - 7)
+                elif snake.direction == "LEFT":
+                    e1 = (px + 6, py + 5)
+                    e2 = (px + 6, py + CELL_SIZE - 7)
+                elif snake.direction == "UP":
+                    e1 = (px + 5, py + 6)
+                    e2 = (px + CELL_SIZE - 7, py + 6)
+                elif snake.direction == "DOWN":
+                    e1 = (px + 5, py + CELL_SIZE - 6)
+                    e2 = (px + CELL_SIZE - 7, py + CELL_SIZE - 6)
+                else:
+                    e1 = (px + 6, py + 5)
+                    e2 = (px + CELL_SIZE - 6, py + CELL_SIZE - 7)
+
+                pygame.draw.circle(screen, WHITE, e1, eye_r)
+                pygame.draw.circle(screen, WHITE, e2, eye_r)
+                pygame.draw.circle(screen, BLACK, e1, 2)
+                pygame.draw.circle(screen, BLACK, e2, 2)
+
+        # 绘制粒子和弹出
+        particles.draw(screen)
+        for p in popups:
+            p.draw(screen)
+
+        # UI
+        score_text = font.render(f"Score: {score}", True, WHITE)
+        screen.blit(score_text, (10, 10))
+
+        hs_text = small_font.render(f"Best: {high_score}", True, GRAY)
+        screen.blit(hs_text, (10, 40))
+
+        # 速度指示器
+        speed = max(1, 10 - move_interval)
+        speed_text = small_font.render(f"Speed: {speed}/10", True, GRAY)
+        screen.blit(speed_text, (SCREEN_WIDTH - 120, 10))
+
+        length_text = small_font.render(f"Length: {len(snake.body)}", True, GRAY)
+        screen.blit(length_text, (SCREEN_WIDTH - 120, 30))
+
+        # 暂停提示
+        if paused and not game_over:
+            pause_text = big_font.render("PAUSED", True, WHITE)
+            screen.blit(pause_text, (SCREEN_WIDTH // 2 - pause_text.get_width() // 2,
+                                     SCREEN_HEIGHT // 2 - pause_text.get_height() // 2))
+            hint = small_font.render("Press P to resume", True, GRAY)
+            screen.blit(hint, (SCREEN_WIDTH // 2 - hint.get_width() // 2,
+                               SCREEN_HEIGHT // 2 + 30))
+
+        # 游戏结束
+        if game_over:
+            overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 160))
+            screen.blit(overlay, (0, 0))
+
+            over_text = big_font.render("GAME OVER", True, RED)
+            screen.blit(over_text, (SCREEN_WIDTH // 2 - over_text.get_width() // 2,
+                                    SCREEN_HEIGHT // 2 - 50))
+
+            final_text = font.render(f"Score: {score}   Best: {high_score}", True, WHITE)
+            screen.blit(final_text, (SCREEN_WIDTH // 2 - final_text.get_width() // 2,
+                                     SCREEN_HEIGHT // 2))
+
+            new_record = ""
+            if score >= high_score and score > 0:
+                new_record = "  NEW RECORD!"
+                nr = font.render("NEW RECORD!", True, GOLD)
+                screen.blit(nr, (SCREEN_WIDTH // 2 - nr.get_width() // 2,
+                                 SCREEN_HEIGHT // 2 + 30))
+
+            restart = small_font.render("Press R to Restart  |  Esc to Quit", True, GRAY)
+            screen.blit(restart, (SCREEN_WIDTH // 2 - restart.get_width() // 2,
+                                  SCREEN_HEIGHT // 2 + 60))
+
         pygame.display.flip()
+        clock.tick(60)
 
     pygame.quit()
-
 
 if __name__ == "__main__":
     main()
